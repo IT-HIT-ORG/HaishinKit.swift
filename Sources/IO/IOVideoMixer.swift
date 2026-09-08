@@ -28,12 +28,38 @@ final class IOVideoMixer<T: IOVideoMixerDelegate> {
         }
     }
 
-    private(set) var inputFormats: [UInt8: CMFormatDescription] = [:]
+    // `inputFormats` is written from TWO queues and was guarded by neither.
+    //
+    //   append(_:sampleBuffer:)  ← AVCaptureVideoDataOutput's sample-buffer queue, EVERY FRAME
+    //   reset(_:)                ← IOVideoUnit's lockQueue, on attach/detach
+    //
+    // and the window is STRUCTURAL rather than unlucky: IOVideoUnit.attachCamera does its work
+    // inside `session.configuration { … }`, which batches the change and does NOT stop the running
+    // session, so frames are still being delivered into append() while reset() mutates the same
+    // dictionary. Swift's native Dictionary is not thread-safe; concurrent mutation corrupts its
+    // storage. Observed in the field as a fatal, unhandled
+    //
+    //   -[__NSTaggedDate objectForKey:]: unrecognized selector sent to instance 0x8000000000000000
+    //     Dictionary._Variant.removeValue  <-  IOVideoMixer.reset  <-  IOVideoUnit.attachCamera
+    //
+    // i.e. a read of a freed/garbage slot, on every camera toggle. A lock rather than a queue hop
+    // because append() runs per frame and must not pay a dispatch; the critical section is one
+    // dictionary write and never calls out (the delegate call below is deliberately outside it, or
+    // a re-entrant delegate would deadlock).
+    private let inputFormatsLock = NSLock()
+    private var storedInputFormats: [UInt8: CMFormatDescription] = [:]
+    var inputFormats: [UInt8: CMFormatDescription] {
+        inputFormatsLock.lock()
+        defer { inputFormatsLock.unlock() }
+        return storedInputFormats
+    }
     private var currentPixelBuffer: CVPixelBuffer?
     private var videoTrackScreenObject = VideoTrackScreenObject()
 
     func append(_ track: UInt8, sampleBuffer: CMSampleBuffer) {
-        inputFormats[track] = sampleBuffer.formatDescription
+        inputFormatsLock.lock()
+        storedInputFormats[track] = sampleBuffer.formatDescription
+        inputFormatsLock.unlock()
         delegate?.videoMixer(self, track: track, didInput: sampleBuffer)
         switch settings.mode {
         case .offscreen:
@@ -61,7 +87,9 @@ final class IOVideoMixer<T: IOVideoMixerDelegate> {
     }
 
     func reset(_ track: UInt8) {
-        inputFormats[track] = nil
+        inputFormatsLock.lock()
+        storedInputFormats[track] = nil
+        inputFormatsLock.unlock()
         let screens: [VideoTrackScreenObject] = screen.getScreenObjects()
         for screen in screens where screen.track == track {
             screen.reset()
