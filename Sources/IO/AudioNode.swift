@@ -127,15 +127,16 @@ class AudioNode {
 }
 
 final class MixerNode: AudioNode {
-    private var mixerComponentDescription = AudioComponentDescription(
-        componentType: kAudioUnitType_Mixer,
-        componentSubType: kAudioUnitSubType_MultiChannelMixer,
-        componentManufacturer: kAudioUnitManufacturer_Apple,
-        componentFlags: 0,
-        componentFlagsMask: 0)
-
     init(format: AVAudioFormat) throws {
-        try super.init(description: &mixerComponentDescription)
+        // A local, not a stored property: passing self's own property inout to super.init crashes the
+        // Swift 6.4 compiler (Xcode 27.1, SILGen ownership verifier, MixerNode.init(format:)).
+        var description = AudioComponentDescription(
+            componentType: kAudioUnitType_Mixer,
+            componentSubType: kAudioUnitSubType_MultiChannelMixer,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0)
+        try super.init(description: &description)
     }
 
     func update(inputCallback: inout AURenderCallbackStruct, bus: UInt8) throws {
@@ -209,13 +210,6 @@ enum OutputNodeError: Error {
 }
 
 final class OutputNode: AudioNode {
-    private var outputComponentDescription = AudioComponentDescription(
-        componentType: kAudioUnitType_Output,
-        componentSubType: kAudioUnitSubType_GenericOutput,
-        componentManufacturer: kAudioUnitManufacturer_Apple,
-        componentFlags: 0,
-        componentFlagsMask: 0)
-
     var format: AVAudioFormat {
         buffer.format
     }
@@ -231,7 +225,14 @@ final class OutputNode: AudioNode {
             throw OutputNodeError.unableToAllocateBuffer
         }
         self.buffer = buffer
-        try super.init(description: &outputComponentDescription)
+        // A local, not a stored property (see MixerNode.init).
+        var description = AudioComponentDescription(
+            componentType: kAudioUnitType_Output,
+            componentSubType: kAudioUnitSubType_GenericOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0)
+        try super.init(description: &description)
     }
 
     func render(numberOfFrames: AVAudioFrameCount,
